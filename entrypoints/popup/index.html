@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="no">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XtoMD Clipper</title>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>XtoMD Clipper</h1>
+        <p id="summary">Henter thread fra aktiv X-fane...</p>
+      </header>
+
+      <label>
+        Filnavn
+        <input id="title" type="text" spellcheck="false">
+      </label>
+
+      <section aria-label="Markdown preview">
+        <textarea id="preview" spellcheck="false"></textarea>
+      </section>
+
+      <div class="actions">
+        <button id="refresh" type="button" class="secondary">Refresh</button>
+        <button id="copy" type="button" class="secondary">Copy Markdown</button>
+        <button id="save" type="button">Save to Obsidian</button>
+      </div>
+
+      <p id="status" aria-live="polite"></p>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
