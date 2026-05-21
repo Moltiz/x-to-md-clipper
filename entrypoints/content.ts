@@ -20,6 +20,8 @@ const threadCache = {
   tweets: new Map<string, CachedTweet>()
 };
 
+const articleCache = new Map<string, ExtractedThread>();
+
 export default defineContentScript({
   matches: ["https://x.com/*", "https://twitter.com/*"],
   main() {
@@ -42,8 +44,18 @@ function extractThread(): ExtractedThread {
   const articles = Array.from(document.querySelectorAll<HTMLElement>('article[data-testid="tweet"]'));
   const parsedTweets = parseTweetArticles(articles);
 
-  const article = extractArticle(sourceUrl, parsedTweets);
-  if (article) return article;
+  const shouldTryArticle = shouldTryArticleExtraction(parsedTweets);
+  const article = extractArticle(sourceUrl, parsedTweets, shouldTryArticle);
+  if (article) {
+    articleCache.set(sourceUrl, article);
+    return article;
+  }
+
+  if (shouldTryArticle) {
+    const cachedArticle = articleCache.get(sourceUrl);
+    if (cachedArticle) return cachedArticle;
+    return buildEmptyArticleResult(sourceUrl, targetHandle);
+  }
 
   markMainThreadFromSnapshot(parsedTweets, targetHandle, targetStatusId);
   const cachedMainThreadPosts = getCachedMainThreadPosts(targetHandle);
@@ -201,8 +213,15 @@ function findTargetTweetIndex(tweets: ParsedTweet[], targetHandle?: string, targ
   return 0;
 }
 
-function extractArticle(sourceUrl: string, parsedTweets: ParsedTweet[]): ExtractedThread | undefined {
-  const shouldTryArticle = isLikelyArticlePage() || (isStatusPageWithMissingTweetText(parsedTweets) && hasArticleContentSignal());
+function shouldTryArticleExtraction(parsedTweets: ParsedTweet[]): boolean {
+  return isLikelyArticlePage() || (isStatusPageWithMissingTweetText(parsedTweets) && hasArticleContentSignal());
+}
+
+function extractArticle(
+  sourceUrl: string,
+  parsedTweets: ParsedTweet[],
+  shouldTryArticle = shouldTryArticleExtraction(parsedTweets)
+): ExtractedThread | undefined {
   if (!shouldTryArticle) return undefined;
 
   const root = findArticleRoot();
@@ -229,7 +248,32 @@ function extractArticle(sourceUrl: string, parsedTweets: ParsedTweet[]): Extract
         authorName,
         text,
         published,
-        images: isLongformArticle(root) ? [] : findImages(root)
+        images: isLongformArticle(root) || isBroadArticleRoot(root) ? [] : findImages(root)
+      }
+    ],
+    capturedAt: new Date().toISOString(),
+    isThread: false,
+    sourceType: "article"
+  };
+}
+
+function buildEmptyArticleResult(sourceUrl: string, targetHandle?: string): ExtractedThread {
+  const authorHandle = targetHandle || getHandleFromUrl(sourceUrl) || "";
+  const title = titleFromDocument() || "X article";
+
+  return {
+    sourceUrl,
+    authorHandle,
+    authorName: authorHandle,
+    title,
+    posts: [
+      {
+        id: sourceUrl,
+        url: sourceUrl,
+        authorHandle,
+        authorName: authorHandle,
+        text: "",
+        images: []
       }
     ],
     capturedAt: new Date().toISOString(),
@@ -291,9 +335,18 @@ function isStatusPageWithMissingTweetText(parsedTweets: ParsedTweet[]): boolean 
 function findArticleRoot(): HTMLElement | undefined {
   const main = document.querySelector<HTMLElement>('main[role="main"]');
   const explicit = document.querySelector<HTMLElement>('[data-testid="article"]');
-  const roots = [explicit, main].filter((root): root is HTMLElement => Boolean(root));
-  const widestRoot = roots.sort((a, b) => normalizeText(b.innerText).length - normalizeText(a.innerText).length)[0];
-  if (widestRoot && normalizeText(widestRoot.innerText).length > 500) return widestRoot;
+  if (explicit && normalizeText(explicit.innerText).length > 100) return explicit;
+
+  const articleSignal = document.querySelector<HTMLElement>(
+    [
+      '[data-testid="twitter-article-title"]',
+      '[data-testid="articleText"]',
+      '[data-testid="articleBody"]',
+      '[class*="longform-"]'
+    ].join(",")
+  );
+  const scopedRoot = articleSignal ? findSpecificArticleRootFromSignal(articleSignal, main) : undefined;
+  if (scopedRoot) return scopedRoot;
 
   const candidates = Array.from((main || document.body).querySelectorAll<HTMLElement>("article, section, div"))
     .filter((element) => {
@@ -303,6 +356,27 @@ function findArticleRoot(): HTMLElement | undefined {
     .sort((a, b) => normalizeText(b.innerText).length - normalizeText(a.innerText).length);
 
   return candidates[0] || main || document.body;
+}
+
+function findSpecificArticleRootFromSignal(signal: HTMLElement, main?: HTMLElement | null): HTMLElement | undefined {
+  let current: HTMLElement | null = signal;
+  let best: HTMLElement | undefined;
+
+  while (current && current !== main && current !== document.body) {
+    const textLength = normalizeText(current.innerText).length;
+    const hasArticleTitle = Boolean(current.querySelector('[data-testid="twitter-article-title"]'));
+    const hasArticleBody = Boolean(current.querySelector('[data-testid="articleText"], [data-testid="articleBody"]'));
+    const longformBlocks = Array.from(current.querySelectorAll<HTMLElement>('[class*="longform-"]'))
+      .filter((element) => getLongformType(element));
+
+    if (textLength > 300 && (hasArticleTitle || hasArticleBody || longformBlocks.length >= 2)) {
+      best = current;
+    }
+
+    current = current.parentElement;
+  }
+
+  return best;
 }
 
 function findArticleTitle(root: HTMLElement): string {
@@ -324,17 +398,13 @@ function findArticleText(root: HTMLElement, title: string): string {
   const orderedLongform = extractOrderedLongformMarkdown(root, title);
   if (orderedLongform.length > 300) return orderedLongform;
 
+  const broadRoot = isBroadArticleRoot(root);
   const candidates: string[] = [];
+  const articleSelectors = broadRoot
+    ? ['[data-testid="articleText"]', '[data-testid="articleBody"]', '[data-testid="noteTweetText"]']
+    : ['[data-testid="articleText"]', '[data-testid="articleBody"]', '[data-testid="noteTweetText"]', '[data-testid="tweetText"]', '[lang]'];
   const articleBlocks = Array.from(
-    root.querySelectorAll<HTMLElement>(
-      [
-        '[data-testid="articleText"]',
-        '[data-testid="articleBody"]',
-        '[data-testid="noteTweetText"]',
-        '[data-testid="tweetText"]',
-        '[lang]'
-      ].join(",")
-    )
+    root.querySelectorAll<HTMLElement>(articleSelectors.join(","))
   )
     .map((element) => normalizeText(element.innerText))
     .filter((line) => isUsefulArticleLine(line, title));
@@ -347,7 +417,7 @@ function findArticleText(root: HTMLElement, title: string): string {
 
   candidates.push(dedupeLines(paragraphs).join("\n\n"));
 
-  const fallbackLines = normalizeText(root.innerText)
+  const fallbackLines = broadRoot ? [] : normalizeText(root.innerText)
     .split("\n")
     .map((line) => normalizeText(line))
     .filter(Boolean);
@@ -357,6 +427,10 @@ function findArticleText(root: HTMLElement, title: string): string {
   return candidates
     .map((candidate) => cleanArticleText(candidate, title))
     .sort((a, b) => b.length - a.length)[0] || "";
+}
+
+function isBroadArticleRoot(root: HTMLElement): boolean {
+  return root.matches("main[role='main'], body");
 }
 
 function isLongformArticle(root: HTMLElement): boolean {
