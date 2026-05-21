@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wxt --browser chrome",
     "build": "wxt build --browser chrome",
+    "build:loaded": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-loaded-extension.ps1",
     "zip": "wxt zip --browser chrome",
     "compile": "tsc --noEmit"
   },
